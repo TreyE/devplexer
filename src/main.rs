@@ -1,189 +1,128 @@
 use std::{
-    borrow::Cow,
-    collections::HashMap,
     error::Error,
-    ffi::{OsStr, OsString},
-    io::{BufRead, Cursor},
-    os::unix::ffi::OsStringExt,
-    path::PathBuf,
-    process::{Child, ExitStatus},
-    str::FromStr,
+    process::ExitStatus,
+    sync::mpsc::{Receiver, Sender},
 };
 
-use osakit::{Script, Value};
-use tmux_interface::{
-    AttachSession, ListSessions, NewSession, NewWindow, StdIO, Tmux, TmuxCommands,
+mod iterm;
+
+mod config;
+
+use sysinfo::Pid;
+
+mod tabadapter;
+
+mod tmux;
+
+use std::sync::mpsc::channel;
+use std::thread;
+
+use crate::{
+    config::try_load_config,
+    iterm::ITermTabAdapter,
+    tabadapter::TabAdapter,
+    tmux::{RunningProgram, StartedProgram, cleanup_session, convert_pids, start_command},
 };
 
-struct ProgramSpec {
-    working_directory: PathBuf,
-    command: String,
-    name: String,
+#[derive(Debug, Clone)]
+enum TmuxProcessOutcome {
+    ReceiveErr,
+    ProcessEnded(String, Pid, Pid, Option<ExitStatus>),
 }
 
-struct StartedTmuxProgram {
-    session_name: String,
-    status: ExitStatus,
+fn choose_tab_adapter() -> Result<Option<impl TabAdapter>, Box<dyn Error>> {
+    let ta = ITermTabAdapter::new()?;
+    Ok(Some(ta))
 }
 
-struct RunningTmuxProgram {
-    session_name: String,
-    pid: sysinfo::Pid,
-}
-
-struct StartedProgram {
-    working_directory: PathBuf,
-    command: String,
-    program: StartedTmuxProgram,
-}
-
-struct RunningProgram {
-    working_directory: PathBuf,
-    command: String,
-    program: RunningTmuxProgram,
-}
-
-fn convert_pids(
-    started_commands: &Vec<StartedProgram>,
-) -> Result<Vec<RunningProgram>, Box<dyn Error>> {
-    let mut running_programs: Vec<RunningProgram> = Vec::new();
-    let mut cs = ListSessions::new()
-        .format("#{session_name}: #{pid}")
-        .build()
-        .into_tmux()
-        .into_command();
-    let output = cs.output()?;
-    let entries = output.stdout.lines();
-    let mut pid_mapping: HashMap<String, sysinfo::Pid> = HashMap::new();
-    for entry in entries {
-        if let Some((name, pid)) = entry?.split_once(": ") {
-            let pid_c = u32::from_str(pid)?;
-            let upid = sysinfo::Pid::from_u32(pid_c);
-            pid_mapping.insert(name.to_owned(), upid);
+fn wait_for_term(out_chan: &Sender<TmuxProcessOutcome>, running_p: &RunningProgram) {
+    let rp = (*running_p).clone();
+    let tx = out_chan.clone();
+    thread::spawn(move || {
+        let s: sysinfo::System = sysinfo::System::new_all();
+        let p_proc = s.process(rp.program.program_pid);
+        if let Some(_p_pid) = p_proc {
+            let stat = p_proc.unwrap().wait();
+            let _ = tx.send(TmuxProcessOutcome::ProcessEnded(
+                rp.program.session_name,
+                rp.program.tmux_pid,
+                rp.program.program_pid,
+                stat,
+            ));
+        } else {
+            let _ = tx.send(TmuxProcessOutcome::ProcessEnded(
+                rp.program.session_name,
+                rp.program.tmux_pid,
+                rp.program.program_pid,
+                None,
+            ));
         }
-    }
-    for sc in started_commands.iter() {
-        let sn = sc.program.session_name.clone();
-        let pm = pid_mapping.get(&sn).unwrap();
-        let rp = RunningProgram {
-            working_directory: sc.working_directory.clone(),
-            command: sc.command.clone(),
-            program: RunningTmuxProgram {
-                session_name: sn,
-                pid: pm.clone(),
-            },
-        };
-        running_programs.push(rp);
-    }
-    Ok(running_programs)
+    });
 }
 
-fn spawn_iterm_tab(session_name: &str) -> Result<Value, Box<dyn Error>> {
-    let cmd = AttachSession::new()
-        .target_session(session_name)
-        .detach_other()
-        .build()
-        .into_tmux()
-        .into_command();
-    let cmd_args: Vec<&OsStr> = cmd.get_args().collect();
-    let mut encoded_string = cmd.get_program().to_os_string().into_encoded_bytes();
-    encoded_string.extend(" ".as_bytes());
-    encoded_string.extend(cmd_args.join(OsStr::new(" ")).into_vec());
-    //encoded_string.extend("; exit".as_bytes());
-    let cmd_string: String = String::from_utf8(encoded_string)?;
-    println!("{:?}", cmd_string);
-    let cmd_str = osakit::Value::String(cmd_string);
-    let mut script = Script::new_from_source(
-        osakit::Language::AppleScript,
-        "on look_at_tmux(x)
-            tell application \"iTerm\"
-    	       activate
-    	       tell current window
-    		     set t to (create tab with default profile)
-    			 set sess to (current session of t)
-    		     set wid to id
-    		     set sid to (id of sess)
-			     tell sess
-				   write text x
-			     end tell
-    	       end tell
-            end tell
-            return {windowid:wid, sessionid:sid}
-         end look_at_tmux",
-    );
-    script.compile()?;
-    let r = script.execute_function("look_at_tmux", vec![cmd_str])?;
-    println!("{:?}", r);
-    Ok(r)
-}
-
-fn build_spec_with_base(
-    name: &str,
-    base_dir: &str,
-    working_directory: &str,
-    command: &str,
-) -> Result<ProgramSpec, Box<dyn Error>> {
-    let working_dir;
-    let relative_part = std::path::PathBuf::from_str(working_directory)?;
-    if relative_part.is_absolute() {
-        working_dir = relative_part;
+fn check_for_message(
+    rx: &Receiver<TmuxProcessOutcome>,
+    outstanding_pids: &Vec<Pid>,
+) -> Option<TmuxProcessOutcome> {
+    if outstanding_pids.is_empty() {
+        return None;
+    }
+    if let Ok(msg) = rx.recv() {
+        Some(msg)
     } else {
-        working_dir = std::path::PathBuf::from_str(base_dir)?.join(relative_part);
+        Some(TmuxProcessOutcome::ReceiveErr)
     }
-    Ok(ProgramSpec {
-        name: name.to_owned(),
-        command: command.to_owned(),
-        working_directory: working_dir.to_owned(),
-    })
 }
-
-fn start_command(
-    session_name: &str,
-    p_spec: &ProgramSpec,
-) -> Result<StartedProgram, Box<dyn Error>> {
-    let s_name = session_name.to_owned() + "-" + &p_spec.name;
-    let s_cmd = NewSession::new()
-        .detached()
-        .session_name(&s_name)
-        .start_directory(p_spec.working_directory.as_os_str().to_string_lossy())
-        .shell_command(&p_spec.command);
-    let tmux = s_cmd.build().into_tmux();
-    let estatus = tmux.status()?;
-    Ok(StartedProgram {
-        working_directory: p_spec.working_directory.clone(),
-        command: p_spec.command.clone(),
-        program: StartedTmuxProgram {
-            session_name: s_name,
-            status: estatus,
-        },
-    })
-}
-
-static PROGSPECS: [(&str, &str, &str); 2] = [
-    (
-        "ui-tailwind",
-        "/Users/tevans/proj/localstack-viewer/ui",
-        "source ~/.bashrc; nvm use system; npx @tailwindcss/cli -i ./input.css -o ./assets/tailwind.css --watch",
-    ),
-    ("ui", "/Users/tevans/proj/localstack-viewer/ui", "dx serve"),
-];
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let mut args = std::env::args();
+    if args.len() < 2 {
+        println!("{:?}", args);
+        return Ok(());
+    }
+
+    let exe_loc = std::env::current_dir().unwrap();
+    let f_name = args.nth_back(0).unwrap();
+    let exe_path = exe_loc.canonicalize().unwrap();
+
+    let config = try_load_config(&exe_path, &f_name)?;
+
     let mut started_commands: Vec<StartedProgram> = Vec::new();
-    for (n, d, c) in PROGSPECS.iter() {
-        let spec = build_spec_with_base(n, "", d, c)?;
-        let comm = start_command("localstack-viewer", &spec)?;
+    for spec in config.apps.iter() {
+        let comm = start_command(&config.namespace, &spec)?;
+        println!("App Starting: {}", spec.name);
         started_commands.push(comm);
     }
     let mut running_programs = convert_pids(&started_commands)?;
-    let mut s = sysinfo::System::new_all();
-    for c in running_programs.iter_mut() {
-        let _c = spawn_iterm_tab(&c.program.session_name);
+    let mut tab_adapter = choose_tab_adapter()?;
+    if let Some(ta) = tab_adapter.as_mut() {
+        for c in running_programs.iter_mut() {
+            ta.open(&c.program.session_name);
+        }
     }
-    for c in running_programs.iter_mut() {
-        let proc = s.process(c.program.pid);
-        let rs = proc.unwrap().wait();
-        println!("{:?}", rs);
+    let (tx, rx) = channel::<TmuxProcessOutcome>();
+    let mut outstanding_pids = Vec::new();
+    let mut dead_sessions = Vec::new();
+    for c in running_programs.iter() {
+        outstanding_pids.push(c.program.program_pid);
+        wait_for_term(&tx, &c);
+    }
+    println!("{:?}", outstanding_pids);
+    while let Some(evt) = check_for_message(&rx, &outstanding_pids) {
+        match evt {
+            TmuxProcessOutcome::ProcessEnded(s, _t_pid, p_pid, _) => {
+                println!("Process Died: {s} - PID {p_pid}");
+                outstanding_pids.retain(|f| f != &p_pid);
+                dead_sessions.push(s);
+            }
+            _ => {}
+        }
+    }
+    for ds in dead_sessions.iter() {
+        cleanup_session(ds);
+        if let Some(ta) = tab_adapter.as_mut() {
+            ta.close(ds);
+        }
     }
     Ok(())
 }
