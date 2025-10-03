@@ -81,9 +81,9 @@ impl DisplayStatus {
 impl std::fmt::Display for AppStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Dead => f.write_str("X"),
-            Self::Running => f.write_str("R"),
-            Self::Started => f.write_str("S"),
+            Self::Dead => f.write_str("❌"),
+            Self::Running => f.write_str("🚀"),
+            Self::Started => f.write_str("🛫"),
         }
     }
 }
@@ -98,11 +98,11 @@ impl Widget for &DisplayStatus {
             let row = Row::from_iter(vec![aname.to_owned(), format!("{}", astatus)]);
             rows.push(row);
         }
-        let widths = vec![Constraint::Length(45), Constraint::Length(1)];
+        let widths = vec![Constraint::Length(46), Constraint::Length(4)];
         let table = Table::new(rows, widths);
         let vlayout = Layout::vertical(vec![Constraint::Length(self.app_statuses.len() as u16)])
             .flex(Flex::Center);
-        let hlayout = Layout::horizontal(vec![Constraint::Length(46)]).flex(Flex::Center);
+        let hlayout = Layout::horizontal(vec![Constraint::Length(50)]).flex(Flex::Center);
         let [area] = hlayout.areas(area);
         let [area] = vlayout.areas(area);
         table.render(area, buf);
@@ -112,7 +112,7 @@ impl Widget for &DisplayStatus {
 #[derive(Debug, Clone)]
 enum TmuxProcessOutcome {
     ReceiveErr,
-    ProcessEnded(String, Pid, Pid, Option<ExitStatus>),
+    ProcessEnded(String, String, Pid, Pid, Option<ExitStatus>),
 }
 
 fn choose_tab_adapter() -> Result<Option<impl TabAdapter>, Box<dyn Error>> {
@@ -132,6 +132,7 @@ fn wait_for_term(
         if let Some(_p_pid) = p_proc {
             let stat = p_proc.unwrap().wait();
             let _ = tx.send(TmuxProcessOutcome::ProcessEnded(
+                rp.spec.name,
                 rp.program.session_name,
                 rp.program.tmux_pid,
                 rp.program.program_pid,
@@ -139,6 +140,7 @@ fn wait_for_term(
             ));
         } else {
             let _ = tx.send(TmuxProcessOutcome::ProcessEnded(
+                rp.spec.name,
                 rp.program.session_name,
                 rp.program.tmux_pid,
                 rp.program.program_pid,
@@ -196,7 +198,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = ratatui::init();
     while let Some(evt) = check_for_message(&rx, &outstanding_pids) {
         match evt {
-            TmuxProcessOutcome::ProcessEnded(s, _t_pid, p_pid, _) => {
+            TmuxProcessOutcome::ProcessEnded(s, _s_name, _t_pid, p_pid, _) => {
                 outstanding_pids.retain(|f| f != &p_pid);
                 display_status.mark_app_dead(&s);
                 dead_sessions.push(s);
