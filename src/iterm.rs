@@ -26,7 +26,6 @@ impl TabAdapter for ITermTabAdapter {
         if let Ok(sr) = spawn_res {
             self.iterm_mappings.insert(session_name.to_owned(), sr);
         }
-        let _ = refocus_original_session(&self.current_session);
     }
 
     fn close(&mut self, session_name: &str) {
@@ -34,6 +33,14 @@ impl TabAdapter for ITermTabAdapter {
             let _ = cleanup_iterm_tab(v);
             self.iterm_mappings.remove(session_name);
         }
+    }
+
+    fn after_all_open(&mut self) {
+        let _ = refocus_original_session(&self.current_session);
+    }
+
+    fn after_all_closed(&mut self) {
+        let _ = refocus_original_session(&self.current_session);
     }
 }
 
@@ -57,7 +64,6 @@ fn get_original_session() -> Result<Value, Box<dyn Error>> {
     );
     script.compile()?;
     let r = script.execute_function("get_original_tab", vec![]);
-    println!("{:?}", r);
     if r.is_err() {
         return Ok(Value::Null);
     }
@@ -93,7 +99,7 @@ fn refocus_original_session(t: &Value) -> Result<(), Box<dyn Error>> {
         end focus_original_tab",
     );
     script.compile()?;
-    let _r = script.execute_function("focus_original_tab", vec![t.clone()])?;
+    let _r = script.execute_function("focus_original_tab", vec![t.clone()]);
     Ok(())
 }
 

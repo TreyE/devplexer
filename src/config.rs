@@ -29,6 +29,7 @@ pub(crate) enum InvalidAppSpecError {
 
 #[derive(Debug, Clone)]
 pub(crate) enum ConfigurationSettingsError {
+    ConfigurationFileNotFound(String),
     InvalidConfigurationFilePath(String),
     InvalidConfigurationFileContentError(String),
     InvalidConfigurationFileStructureError(Yaml),
@@ -169,20 +170,33 @@ fn load_config(file_path: &Path) -> Result<Configuration, Box<dyn Error>> {
     string_to_config(p_dir, &file_content)
 }
 
-pub(crate) fn try_load_config(
-    parent_path: &Path,
-    config_file_path: &str,
-) -> Result<Configuration, Box<dyn Error>> {
-    let pb = PathBuf::from_str(config_file_path).map_err(|_e| {
-        ConfigurationSettingsError::InvalidConfigurationFilePath(config_file_path.to_owned())
-    })?;
-    let mut full_config_path = pb.clone();
-    if !pb.is_absolute() {
-        full_config_path = parent_path.join(pb);
+fn resolve_config_path(
+    current_dir: &Path,
+    args: &mut std::env::Args,
+) -> Result<PathBuf, Box<dyn Error>> {
+    if args.len() < 2 {
+        Ok(current_dir.join("devplexer.yaml"))
+    } else {
+        let cfp = &args.nth_back(0).unwrap();
+        let pb = PathBuf::from_str(cfp).map_err(|_e| {
+            ConfigurationSettingsError::InvalidConfigurationFilePath(cfp.to_owned())
+        })?;
+        if !pb.is_absolute() {
+            Ok(current_dir.join(pb))
+        } else {
+            Ok(pb)
+        }
     }
+}
+
+pub(crate) fn try_load_config(
+    current_dir: &Path,
+    args: &mut std::env::Args,
+) -> Result<Configuration, Box<dyn Error>> {
+    let full_config_path = resolve_config_path(current_dir, args)?;
     if !full_config_path.exists() {
         return Err(Box::new(
-            ConfigurationSettingsError::InvalidConfigurationFilePath(
+            ConfigurationSettingsError::ConfigurationFileNotFound(
                 full_config_path.to_str().unwrap().to_owned(),
             ),
         ));

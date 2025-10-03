@@ -74,8 +74,6 @@ pub(crate) fn convert_pids(
         let pm = pid_mapping
             .get(&sn)
             .ok_or_else(|| ProgramStartErrors::ProgramDiedEarlyError(sn.clone()))?;
-        let child_pid = pm.1;
-        println!("App Running: {sn} - PID {child_pid}");
         let rp = RunningProgram {
             spec: sc.spec.clone(),
             program: RunningTmuxProgram {
