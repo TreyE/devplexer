@@ -1,8 +1,10 @@
 use std::error::Error;
 
-use crate::tabadapter::iterm::ITermTabAdapter;
+#[cfg(target_os = "macos")]
+mod iterm;
 
-pub(crate) mod iterm;
+#[cfg(target_os = "macos")]
+use crate::tabadapter::iterm::ITermTabAdapter;
 
 pub(crate) trait TabAdapter {
     fn open(&mut self, session_name: &str);
@@ -12,6 +14,13 @@ pub(crate) trait TabAdapter {
 }
 
 pub(crate) fn choose_tab_adapter() -> Result<Option<Box<dyn TabAdapter>>, Box<dyn Error>> {
-    let ta = ITermTabAdapter::new()?;
-    Ok(Some(Box::new(ta)))
+    #[cfg(target_os = "macos")]
+    {
+        let ta = ITermTabAdapter::new()?;
+        Ok(Some(Box::new(ta)))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(None)
+    }
 }
