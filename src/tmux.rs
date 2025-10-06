@@ -1,10 +1,11 @@
 use std::{collections::HashMap, error::Error, io::BufRead, str::FromStr};
 
-use tmux_interface::{KillSession, ListSessions, NewSession, SendKeys, Tmux};
+use tmux_interface::{KillSession, ListSessions, NewSession, SendKeys};
 
 use crate::config::ProgramSpec;
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) enum ProgramStartErrors {
     ProgramDiedEarlyError(String),
 }
@@ -19,6 +20,7 @@ impl std::error::Error for ProgramStartErrors {}
 
 #[derive(Clone)]
 pub(crate) struct RunningTmuxProgram {
+    #[allow(dead_code)]
     pub(crate) command: String,
     pub(crate) session_name: String,
     pub(crate) tmux_pid: sysinfo::Pid,

@@ -20,6 +20,7 @@ pub(crate) struct ProgramSpec {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) enum InvalidAppSpecError {
     InvalidNameError(Yaml),
     InvalidSpecStructureError(String, Yaml),
@@ -28,6 +29,7 @@ pub(crate) enum InvalidAppSpecError {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) enum ConfigurationSettingsError {
     ConfigurationFileNotFound(String),
     InvalidConfigurationFilePath(String),

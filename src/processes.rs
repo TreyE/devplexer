@@ -53,7 +53,7 @@ pub(crate) fn kill_process(pid: &Pid, session_name: &Option<String>) {
             send_interrupt(&sn);
             let mut timedout = false;
             let start_at = SystemTime::now();
-            while let Some(p) = s.process(pid.clone())
+            while let Some(_p) = s.process(pid.clone())
                 && !timedout
             {
                 std::thread::sleep(Duration::from_millis(100));

@@ -213,6 +213,7 @@ enum AppEvent {
     ReceiveErr,
     IgnoredEvent,
     QuitKeyEvent,
+    #[allow(dead_code)]
     ProcessEnded(String, String, Pid, Pid, Option<ExitStatus>),
 }
 
