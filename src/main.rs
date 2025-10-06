@@ -18,9 +18,12 @@ mod tmux;
 mod processes;
 
 use ratatui::{
+    buffer::Cell,
     crossterm::event::{self, Event, KeyCode},
     layout::{Constraint, Flex, Layout},
-    widgets::{Row, Table, Widget},
+    style::{Modifier, Style, Stylize},
+    text::Text,
+    widgets::{Paragraph, Row, Table, Widget},
 };
 use std::sync::mpsc::channel;
 use std::thread;
@@ -34,8 +37,8 @@ use crate::{
 
 enum AppStatus {
     Started,
-    Running,
-    Dead,
+    Running(Pid),
+    Dead(Pid),
 }
 
 struct DisplayStatus {
@@ -80,13 +83,13 @@ impl DisplayStatus {
     fn mark_app_running(&mut self, app_name: &str, session_name: &str, pid: &Pid) {
         self.outstanding_pids.push(pid.clone());
         self.app_statuses
-            .insert(app_name.to_owned(), AppStatus::Running);
+            .insert(app_name.to_owned(), AppStatus::Running(pid.clone()));
         self.pid_map.insert(pid.clone(), session_name.to_owned());
     }
 
     fn mark_app_dead(&mut self, app_name: &str, session_name: &str, pid: &Pid) {
         self.app_statuses
-            .insert(app_name.to_owned(), AppStatus::Dead);
+            .insert(app_name.to_owned(), AppStatus::Dead(pid.clone()));
         self.outstanding_pids.retain(|f| f != pid);
         self.dead_sessions.push(session_name.to_owned());
     }
@@ -176,16 +179,16 @@ impl DisplayStatus {
         self.shut_down_events();
     }
 }
-
+/*
 impl std::fmt::Display for AppStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Dead => f.write_str("❌"),
-            Self::Running => f.write_str("🚀"),
-            Self::Started => f.write_str("🛫"),
+            Self::Running(_) => f.write_str("🚀"),
+            Self::Started(_) => f.write_str("🛫"),
         }
     }
-}
+}*/
 
 impl Widget for &DisplayStatus {
     fn render(self, area: ratatui::prelude::Rect, buf: &mut ratatui::prelude::Buffer)
@@ -193,18 +196,52 @@ impl Widget for &DisplayStatus {
         Self: Sized,
     {
         let mut rows = Vec::new();
+        let n_cell = Text::raw("Name").left_aligned();
+        let p_cell = Text::raw("PID").centered();
+        let s_cell = Text::raw("Status");
+        let title_row = Row::from_iter(vec![n_cell, p_cell, s_cell])
+            .underlined()
+            .bold();
+        rows.push(title_row);
         for (aname, astatus) in self.app_statuses.iter() {
-            let row = Row::from_iter(vec![aname.to_owned(), format!("{}", astatus)]);
+            let row_vals = match astatus {
+                AppStatus::Dead(rp) => vec![
+                    Text::raw(aname.to_owned()),
+                    Text::raw(rp.to_string()).right_aligned(),
+                    Text::raw("❌".to_owned()).right_aligned(),
+                ],
+                AppStatus::Running(rp) => vec![
+                    Text::raw(aname.to_owned()),
+                    Text::raw(rp.to_string()).right_aligned(),
+                    Text::raw("🚀".to_owned()).right_aligned(),
+                ],
+                _ => vec![
+                    Text::raw(aname.to_owned()),
+                    Text::raw("N/A".to_owned()).right_aligned(),
+                    Text::raw("🛫".to_owned()).right_aligned(),
+                ],
+            };
+            let row = Row::from_iter(row_vals);
             rows.push(row);
         }
-        let widths = vec![Constraint::Length(46), Constraint::Length(4)];
+        let widths = vec![
+            Constraint::Fill(1),
+            Constraint::Length(6),
+            Constraint::Length(6),
+        ];
         let table = Table::new(rows, widths);
-        let vlayout = Layout::vertical(vec![Constraint::Length(self.app_statuses.len() as u16)])
-            .flex(Flex::Center);
-        let hlayout = Layout::horizontal(vec![Constraint::Length(50)]).flex(Flex::Center);
+        let vlayout = Layout::vertical(vec![Constraint::Length(
+            (self.app_statuses.len() + 1) as u16,
+        )])
+        .flex(Flex::Center);
+        let vlayout2 = Layout::vertical(vec![Constraint::Length(1)]).flex(Flex::End);
+        let hlayout = Layout::horizontal(vec![Constraint::Fill(1)]).flex(Flex::Center);
         let [area] = hlayout.areas(area);
-        let [area] = vlayout.areas(area);
-        table.render(area, buf);
+        let [t_area] = vlayout.areas(area);
+        let [help_area] = vlayout2.areas(area);
+        let p = Paragraph::new("Q - Quit").centered();
+        table.render(t_area, buf);
+        p.render(help_area, buf);
     }
 }
 
