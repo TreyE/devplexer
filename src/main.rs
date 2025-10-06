@@ -28,11 +28,9 @@ use std::thread;
 use crate::{
     config::try_load_config,
     processes::kill_process,
-    tabadapter::TabAdapter,
+    tabadapter::{TabAdapter, choose_tab_adapter},
     tmux::{RunningProgram, StartedProgram, cleanup_session, convert_pids, start_command},
 };
-
-use crate::tabadapter::iterm::ITermTabAdapter;
 
 enum AppStatus {
     Started,
@@ -216,11 +214,6 @@ enum AppEvent {
     IgnoredEvent,
     QuitKeyEvent,
     ProcessEnded(String, String, Pid, Pid, Option<ExitStatus>),
-}
-
-fn choose_tab_adapter() -> Result<Option<Box<dyn TabAdapter>>, Box<dyn Error>> {
-    let ta = ITermTabAdapter::new()?;
-    Ok(Some(Box::new(ta)))
 }
 
 fn wait_for_term(out_chan: &Sender<AppEvent>, running_p: &RunningProgram) -> JoinHandle<()> {
