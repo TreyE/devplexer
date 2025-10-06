@@ -13,14 +13,13 @@ pub(crate) trait TabAdapter {
     fn after_all_closed(&mut self);
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn choose_tab_adapter() -> Result<Option<Box<dyn TabAdapter>>, Box<dyn Error>> {
-    #[cfg(target_os = "macos")]
-    {
-        let ta = ITermTabAdapter::new()?;
-        Ok(Some(Box::new(ta)))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Ok(None)
-    }
+    let ta = ITermTabAdapter::new()?;
+    Ok(Some(Box::new(ta)))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn choose_tab_adapter() -> Result<Option<Box<dyn TabAdapter>>, Box<dyn Error>> {
+    Ok(None)
 }
