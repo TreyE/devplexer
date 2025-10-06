@@ -7,8 +7,6 @@ use std::{
     time::Duration,
 };
 
-mod iterm;
-
 mod config;
 
 use sysinfo::Pid;
@@ -29,14 +27,12 @@ use std::thread;
 
 use crate::{
     config::try_load_config,
-    iterm::ITermTabAdapter,
     processes::kill_process,
     tabadapter::TabAdapter,
-    tmux::{
-        RunningProgram, StartedProgram, cleanup_session, convert_pids, send_interrupt,
-        start_command,
-    },
+    tmux::{RunningProgram, StartedProgram, cleanup_session, convert_pids, start_command},
 };
+
+use crate::tabadapter::iterm::ITermTabAdapter;
 
 enum AppStatus {
     Started,
