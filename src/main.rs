@@ -4,6 +4,7 @@ use std::{
     process::ExitStatus,
     sync::mpsc::{Receiver, Sender},
     thread::JoinHandle,
+    time::Duration,
 };
 
 mod iterm;
@@ -16,23 +17,25 @@ mod tabadapter;
 
 mod tmux;
 
+mod processes;
+
 use ratatui::{
-    CompletedFrame, DefaultTerminal, Frame,
+    crossterm::event::{self, Event, KeyCode},
     layout::{Constraint, Flex, Layout},
-    style::Style,
-    text::Text,
-    widgets::{Block, Row, Table, Widget},
+    widgets::{Row, Table, Widget},
 };
 use std::sync::mpsc::channel;
 use std::thread;
-use tmux_interface::Formats;
-use yaml_rust2::yaml::Hash;
 
 use crate::{
     config::try_load_config,
     iterm::ITermTabAdapter,
+    processes::kill_process,
     tabadapter::TabAdapter,
-    tmux::{RunningProgram, StartedProgram, cleanup_session, convert_pids, start_command},
+    tmux::{
+        RunningProgram, StartedProgram, cleanup_session, convert_pids, send_interrupt,
+        start_command,
+    },
 };
 
 enum AppStatus {
@@ -43,18 +46,35 @@ enum AppStatus {
 
 struct DisplayStatus {
     app_statuses: HashMap<String, AppStatus>,
+    pid_map: HashMap<Pid, String>,
     outstanding_pids: Vec<Pid>,
     dead_sessions: Vec<String>,
     join_handles: Vec<JoinHandle<()>>,
+    event_handle: Option<JoinHandle<()>>,
+    event_signal_channel: Option<Sender<()>>,
+    is_quiting: bool,
+    killer_procs: Option<Vec<JoinHandle<()>>>,
+    tab_adapter: Option<Box<dyn TabAdapter>>,
+    child_event_listener: Receiver<AppEvent>,
+    child_event_sender: Sender<AppEvent>,
 }
 
 impl DisplayStatus {
-    fn new() -> Self {
+    fn new(ta: Option<Box<dyn TabAdapter>>) -> Self {
+        let (ces, cel) = channel::<AppEvent>();
         DisplayStatus {
             app_statuses: HashMap::new(),
             outstanding_pids: Vec::new(),
+            pid_map: HashMap::new(),
             dead_sessions: Vec::new(),
             join_handles: Vec::new(),
+            event_handle: None,
+            event_signal_channel: None,
+            is_quiting: false,
+            killer_procs: None,
+            tab_adapter: ta,
+            child_event_listener: cel,
+            child_event_sender: ces,
         }
     }
 
@@ -63,18 +83,103 @@ impl DisplayStatus {
             .insert(app_name.to_owned(), AppStatus::Started);
     }
 
-    fn mark_app_running(&mut self, app_name: &str) {
+    fn mark_app_running(&mut self, app_name: &str, session_name: &str, pid: &Pid) {
+        self.outstanding_pids.push(pid.clone());
         self.app_statuses
             .insert(app_name.to_owned(), AppStatus::Running);
+        self.pid_map.insert(pid.clone(), session_name.to_owned());
     }
 
-    fn mark_app_dead(&mut self, app_name: &str) {
+    fn mark_app_dead(&mut self, app_name: &str, session_name: &str, pid: &Pid) {
         self.app_statuses
             .insert(app_name.to_owned(), AppStatus::Dead);
+        self.outstanding_pids.retain(|f| f != pid);
+        self.dead_sessions.push(session_name.to_owned());
     }
 
     fn enqueue_receiver(&mut self, recv: JoinHandle<()>) {
         self.join_handles.push(recv);
+    }
+
+    fn wait_for_handles(&mut self) {
+        while !self.join_handles.is_empty() {
+            let item = self.join_handles.pop();
+            let _ = item.unwrap().join();
+        }
+    }
+
+    fn start_running(&mut self, running_programs: &Vec<RunningProgram>) {
+        let (es, dc) = channel::<()>();
+        if let Some(ta) = self.tab_adapter.as_mut() {
+            for c in running_programs.iter() {
+                ta.open(&c.program.session_name);
+            }
+            ta.after_all_open();
+        }
+        for c in running_programs.iter() {
+            self.mark_app_running(
+                &c.spec.name,
+                &c.program.session_name,
+                &c.program.program_pid,
+            );
+            self.enqueue_receiver(wait_for_term(&self.child_event_sender, &c));
+        }
+        self.event_signal_channel = Some(es);
+        self.event_handle = Some(start_event_loop(&self.child_event_sender, dc));
+    }
+
+    fn finish_running_with_adapter(&mut self) {
+        if let Some(ta) = self.tab_adapter.as_mut() {
+            ta.after_all_closed();
+        }
+    }
+
+    fn shutdown_session(&mut self, session_name: &str) {
+        cleanup_session(session_name);
+        if let Some(ta) = self.tab_adapter.as_mut() {
+            ta.close(session_name);
+        }
+    }
+
+    fn shut_down_events(self) {
+        if let Some(esc) = self.event_signal_channel {
+            let _ = esc.send(());
+        }
+        if let Some(eh) = self.event_handle {
+            let _ = eh.join();
+        }
+        if let Some(mut kp) = self.killer_procs {
+            while !kp.is_empty() {
+                if let Some(kp_jh) = kp.pop() {
+                    let _ = kp_jh.join();
+                }
+            }
+        }
+    }
+
+    fn execute_quit(&mut self) {
+        if !self.is_quiting {
+            self.is_quiting = true;
+            let mut kps = Vec::new();
+            for p in self.outstanding_pids.iter() {
+                let the_process = p.clone();
+                let session_name = self.pid_map.get(&the_process);
+                let owned_sn = session_name.map(|s| s.to_owned());
+                kps.push(thread::spawn(move || {
+                    kill_process(&the_process, &owned_sn);
+                }));
+            }
+            self.killer_procs = Some(kps);
+        }
+    }
+
+    fn finish_shutdown(mut self) {
+        for sn in self.dead_sessions.clone().iter() {
+            self.shutdown_session(&sn);
+        }
+        self.finish_running_with_adapter();
+        self.wait_for_handles();
+        self.shut_down_events();
     }
 }
 
@@ -110,20 +215,19 @@ impl Widget for &DisplayStatus {
 }
 
 #[derive(Debug, Clone)]
-enum TmuxProcessOutcome {
+enum AppEvent {
     ReceiveErr,
+    IgnoredEvent,
+    QuitKeyEvent,
     ProcessEnded(String, String, Pid, Pid, Option<ExitStatus>),
 }
 
-fn choose_tab_adapter() -> Result<Option<impl TabAdapter>, Box<dyn Error>> {
+fn choose_tab_adapter() -> Result<Option<Box<dyn TabAdapter>>, Box<dyn Error>> {
     let ta = ITermTabAdapter::new()?;
-    Ok(Some(ta))
+    Ok(Some(Box::new(ta)))
 }
 
-fn wait_for_term(
-    out_chan: &Sender<TmuxProcessOutcome>,
-    running_p: &RunningProgram,
-) -> JoinHandle<()> {
+fn wait_for_term(out_chan: &Sender<AppEvent>, running_p: &RunningProgram) -> JoinHandle<()> {
     let rp = (*running_p).clone();
     let tx = out_chan.clone();
     thread::spawn(move || {
@@ -131,7 +235,7 @@ fn wait_for_term(
         let p_proc = s.process(rp.program.program_pid);
         if let Some(_p_pid) = p_proc {
             let stat = p_proc.unwrap().wait();
-            let _ = tx.send(TmuxProcessOutcome::ProcessEnded(
+            let _ = tx.send(AppEvent::ProcessEnded(
                 rp.spec.name,
                 rp.program.session_name,
                 rp.program.tmux_pid,
@@ -139,7 +243,7 @@ fn wait_for_term(
                 stat,
             ));
         } else {
-            let _ = tx.send(TmuxProcessOutcome::ProcessEnded(
+            let _ = tx.send(AppEvent::ProcessEnded(
                 rp.spec.name,
                 rp.program.session_name,
                 rp.program.tmux_pid,
@@ -150,17 +254,51 @@ fn wait_for_term(
     })
 }
 
-fn check_for_message(
-    rx: &Receiver<TmuxProcessOutcome>,
-    outstanding_pids: &Vec<Pid>,
-) -> Option<TmuxProcessOutcome> {
-    if outstanding_pids.is_empty() {
+fn start_event_loop(out_chan: &Sender<AppEvent>, die_chan: Receiver<()>) -> JoinHandle<()> {
+    let tx = out_chan.clone();
+    thread::spawn(move || {
+        loop {
+            let ep = event::poll(Duration::from_millis(200));
+            match ep {
+                Ok(true) => {
+                    if let Ok(ev) = event::read() {
+                        match ev {
+                            Event::Key(ke) => {
+                                if ke.code == KeyCode::Char('q') {
+                                    let _ = tx.send(AppEvent::QuitKeyEvent);
+                                } else {
+                                    let _ = tx.send(AppEvent::IgnoredEvent);
+                                }
+                            }
+                            _ => {
+                                let _ = tx.send(AppEvent::IgnoredEvent);
+                            }
+                        }
+                    } else {
+                        let _ = tx.send(AppEvent::ReceiveErr);
+                    }
+                }
+                Ok(false) => {
+                    if let Ok(_e) = die_chan.try_recv() {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::ReceiveErr);
+                }
+            }
+        }
+    })
+}
+
+fn check_for_message(ds: &DisplayStatus) -> Option<AppEvent> {
+    if ds.outstanding_pids.is_empty() {
         return None;
     }
-    if let Ok(msg) = rx.recv_timeout(std::time::Duration::from_millis(29)) {
+    if let Ok(msg) = ds.child_event_listener.recv() {
         Some(msg)
     } else {
-        Some(TmuxProcessOutcome::ReceiveErr)
+        Some(AppEvent::ReceiveErr)
     }
 }
 
@@ -173,35 +311,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     let config = try_load_config(&exe_path, &mut args)?;
 
     let mut started_commands: Vec<StartedProgram> = Vec::new();
-    let mut display_status = DisplayStatus::new();
+    let tab_adapter = choose_tab_adapter()?;
+    let mut display_status = DisplayStatus::new(tab_adapter);
     for spec in config.apps.iter() {
         let comm = start_command(&config.namespace, &spec)?;
         started_commands.push(comm);
         display_status.mark_app_started(&spec.name);
     }
-    let mut running_programs = convert_pids(&started_commands)?;
-    let mut tab_adapter = choose_tab_adapter()?;
-    if let Some(ta) = tab_adapter.as_mut() {
-        for c in running_programs.iter_mut() {
-            ta.open(&c.program.session_name);
-        }
-        ta.after_all_open();
-    }
-    let (tx, rx) = channel::<TmuxProcessOutcome>();
-    let mut outstanding_pids = Vec::new();
-    let mut dead_sessions = Vec::new();
-    for c in running_programs.iter() {
-        outstanding_pids.push(c.program.program_pid);
-        display_status.mark_app_running(&c.spec.name);
-        display_status.enqueue_receiver(wait_for_term(&tx, &c));
-    }
+    let running_programs = convert_pids(&started_commands)?;
+    display_status.start_running(&running_programs);
     let mut terminal = ratatui::init();
-    while let Some(evt) = check_for_message(&rx, &outstanding_pids) {
+    while let Some(evt) = check_for_message(&display_status) {
         match evt {
-            TmuxProcessOutcome::ProcessEnded(s, _s_name, _t_pid, p_pid, _) => {
-                outstanding_pids.retain(|f| f != &p_pid);
-                display_status.mark_app_dead(&s);
-                dead_sessions.push(s);
+            AppEvent::ProcessEnded(s, s_name, _t_pid, p_pid, _) => {
+                display_status.mark_app_dead(&s, &s_name, &p_pid);
+                terminal.draw(|f| f.render_widget(&display_status, f.area()))?;
+            }
+            AppEvent::QuitKeyEvent => {
+                display_status.execute_quit();
                 terminal.draw(|f| f.render_widget(&display_status, f.area()))?;
             }
             _ => {
@@ -209,15 +336,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    for ds in dead_sessions.iter() {
-        cleanup_session(ds);
-        if let Some(ta) = tab_adapter.as_mut() {
-            ta.close(ds);
-        }
-    }
-    if let Some(ta) = tab_adapter.as_mut() {
-        ta.after_all_closed();
-    }
+    display_status.finish_shutdown();
     ratatui::restore();
     Ok(())
 }

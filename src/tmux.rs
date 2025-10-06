@@ -1,6 +1,6 @@
 use std::{collections::HashMap, error::Error, io::BufRead, str::FromStr};
 
-use tmux_interface::{KillSession, ListSessions, NewSession};
+use tmux_interface::{KillSession, ListSessions, NewSession, SendKeys, Tmux};
 
 use crate::config::ProgramSpec;
 
@@ -86,6 +86,15 @@ pub(crate) fn convert_pids(
         running_programs.push(rp);
     }
     Ok(running_programs)
+}
+
+pub(crate) fn send_interrupt(session_name: &str) {
+    let _ = SendKeys::new()
+        .target_pane(session_name)
+        .key("C-c")
+        .build()
+        .into_tmux()
+        .status();
 }
 
 pub(crate) fn start_command(
