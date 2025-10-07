@@ -1,14 +1,20 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     error::Error,
+    io::Write,
     process::ExitStatus,
-    sync::mpsc::{Receiver, Sender},
+    sync::{
+        Arc, Mutex,
+        mpsc::{Receiver, Sender},
+    },
     thread::JoinHandle,
     time::Duration,
 };
 
 mod config;
 
+use log::{Log, error, info};
+use simplelog::{Config, WriteLogger};
 use sysinfo::Pid;
 
 mod tabadapter;
@@ -18,12 +24,12 @@ mod tmux;
 mod processes;
 
 use ratatui::{
-    buffer::Cell,
     crossterm::event::{self, Event, KeyCode},
     layout::{Constraint, Flex, Layout},
-    style::{Modifier, Style, Stylize},
+    style::Stylize,
+    symbols,
     text::Text,
-    widgets::{Paragraph, Row, Table, Widget},
+    widgets::{Block, Paragraph, Row, Table, Widget},
 };
 use std::sync::mpsc::channel;
 use std::thread;
@@ -35,13 +41,81 @@ use crate::{
     tmux::{RunningProgram, StartedProgram, cleanup_session, convert_pids, start_command},
 };
 
+struct WritableClearableLog {
+    inner: Arc<Mutex<Vec<u8>>>,
+}
+
+struct EventLogger<'a> {
+    event_sender: &'a Sender<AppEvent>,
+    writer: Arc<Mutex<Vec<u8>>>,
+    write_logger: Box<WriteLogger<WritableClearableLog>>,
+}
+
+impl Write for WritableClearableLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.lock().unwrap().write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> EventLogger<'a> {
+    fn new(sender: &'a Sender<AppEvent>) -> Self {
+        let r_vec = Arc::new(Mutex::new(Vec::new()));
+        let wcl = WritableClearableLog {
+            inner: r_vec.clone(),
+        };
+        EventLogger {
+            writer: r_vec,
+            event_sender: sender,
+            write_logger: WriteLogger::new(log::LevelFilter::Trace, Config::default(), wcl),
+        }
+    }
+}
+
+impl<'a> Log for EventLogger<'a> {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        {
+            let l = self.writer.lock();
+            l.unwrap().clear();
+        };
+        self.write_logger.log(record);
+        let ls = self.writer.lock().unwrap().clone();
+        let _ = self.event_sender.send(AppEvent::LogEvent(ls));
+    }
+
+    fn flush(&self) {}
+}
+
+struct LogBuffer {
+    data_queue: VecDeque<u8>,
+}
+
+impl LogBuffer {
+    fn new() -> Self {
+        LogBuffer {
+            data_queue: VecDeque::with_capacity(4096),
+        }
+    }
+
+    fn write_data(&mut self, data: &Vec<u8>) {
+        self.data_queue.write_all(data.as_slice()).unwrap();
+    }
+}
+
 enum AppStatus {
     Started,
     Running(Pid),
     Dead(Pid),
 }
 
-struct DisplayStatus {
+struct DisplayStatus<'a> {
     app_statuses: HashMap<String, AppStatus>,
     pid_map: HashMap<Pid, String>,
     outstanding_pids: Vec<Pid>,
@@ -53,12 +127,16 @@ struct DisplayStatus {
     killer_procs: Option<Vec<JoinHandle<()>>>,
     tab_adapter: Option<Box<dyn TabAdapter>>,
     child_event_listener: Receiver<AppEvent>,
-    child_event_sender: Sender<AppEvent>,
+    child_event_sender: &'a Sender<AppEvent>,
+    logbuffer: LogBuffer,
 }
 
-impl DisplayStatus {
-    fn new(ta: Option<Box<dyn TabAdapter>>) -> Self {
-        let (ces, cel) = channel::<AppEvent>();
+impl<'a> DisplayStatus<'a> {
+    fn new(
+        ta: Option<Box<dyn TabAdapter>>,
+        ces: &'a Sender<AppEvent>,
+        cel: Receiver<AppEvent>,
+    ) -> Self {
         DisplayStatus {
             app_statuses: HashMap::new(),
             outstanding_pids: Vec::new(),
@@ -72,6 +150,7 @@ impl DisplayStatus {
             tab_adapter: ta,
             child_event_listener: cel,
             child_event_sender: ces,
+            logbuffer: LogBuffer::new(),
         }
     }
 
@@ -127,6 +206,7 @@ impl DisplayStatus {
 
     fn finish_running_with_adapter(&mut self) {
         if let Some(ta) = self.tab_adapter.as_mut() {
+            info!("Shutting down adapter.");
             ta.after_all_closed();
         }
     }
@@ -157,17 +237,27 @@ impl DisplayStatus {
     fn execute_quit(&mut self) {
         if !self.is_quiting {
             self.is_quiting = true;
+            info!("Shutting down tmux sessions and processes.");
             let mut kps = Vec::new();
             for p in self.outstanding_pids.iter() {
                 let the_process = p.clone();
                 let session_name = self.pid_map.get(&the_process);
                 let owned_sn = session_name.map(|s| s.to_owned());
+                info!(
+                    "Shutting down session named: {} - PID {}",
+                    session_name.unwrap_or(&"N/A".to_owned()),
+                    p
+                );
                 kps.push(thread::spawn(move || {
                     kill_process(&the_process, &owned_sn);
                 }));
             }
             self.killer_procs = Some(kps);
         }
+    }
+
+    fn add_log_entry(&mut self, data: &Vec<u8>) {
+        self.logbuffer.write_data(data);
     }
 
     fn finish_shutdown(mut self) {
@@ -179,18 +269,8 @@ impl DisplayStatus {
         self.shut_down_events();
     }
 }
-/*
-impl std::fmt::Display for AppStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Dead => f.write_str("❌"),
-            Self::Running(_) => f.write_str("🚀"),
-            Self::Started(_) => f.write_str("🛫"),
-        }
-    }
-}*/
 
-impl Widget for &DisplayStatus {
+impl<'a> Widget for &DisplayStatus<'a> {
     fn render(self, area: ratatui::prelude::Rect, buf: &mut ratatui::prelude::Buffer)
     where
         Self: Sized,
@@ -230,16 +310,25 @@ impl Widget for &DisplayStatus {
             Constraint::Length(6),
         ];
         let table = Table::new(rows, widths);
-        let vlayout = Layout::vertical(vec![Constraint::Length(
+        let tlayout = Layout::vertical(vec![Constraint::Length(
             (self.app_statuses.len() + 1) as u16,
         )])
         .flex(Flex::Center);
-        let vlayout2 = Layout::vertical(vec![Constraint::Length(1)]).flex(Flex::End);
+        let vlayouttop = Layout::vertical(vec![
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
         let hlayout = Layout::horizontal(vec![Constraint::Fill(1)]).flex(Flex::Center);
-        let [area] = hlayout.areas(area);
-        let [t_area] = vlayout.areas(area);
-        let [help_area] = vlayout2.areas(area);
+        let [help_area] = hlayout.areas(vlayouttop[2]);
+        let [log_area] = hlayout.areas(vlayouttop[1]);
+        let [t_area] = hlayout.areas(tlayout.split(vlayouttop[0])[0]);
         let p = Paragraph::new("Q - Quit").centered();
+        let log_string = Vec::from_iter(self.logbuffer.data_queue.iter().map(|f| f.clone()));
+        let block = Block::bordered().border_set(symbols::border::PLAIN);
+        let log_p = Paragraph::new(unsafe { String::from_utf8_unchecked(log_string) }).block(block);
+        log_p.render(log_area, buf);
         table.render(t_area, buf);
         p.render(help_area, buf);
     }
@@ -250,6 +339,7 @@ enum AppEvent {
     ReceiveErr,
     IgnoredEvent,
     QuitKeyEvent,
+    LogEvent(Vec<u8>),
     #[allow(dead_code)]
     ProcessEnded(String, String, Pid, Pid, Option<ExitStatus>),
 }
@@ -329,17 +419,32 @@ fn check_for_message(ds: &DisplayStatus) -> Option<AppEvent> {
     }
 }
 
+fn create_app_event_channel() -> (&'static Sender<AppEvent>, Receiver<AppEvent>) {
+    let (s, r) = channel::<AppEvent>();
+    (Box::leak(Box::new(s)), r)
+}
+
+fn create_event_logger(aes: &'static Sender<AppEvent>) -> &'static dyn Log {
+    let el = EventLogger::new(&aes);
+    Box::leak(Box::new(el))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    let (aes, aer) = create_app_event_channel();
+    let logger = create_event_logger(aes);
+    log::set_logger(&*logger).unwrap();
+    log::set_max_level(log::LevelFilter::Info);
     let mut args = std::env::args();
 
     let exe_loc = std::env::current_dir().unwrap();
     let exe_path = exe_loc.canonicalize().unwrap();
 
     let config = try_load_config(&exe_path, &mut args)?;
-
+    info!("Loaded configuration.");
     let mut started_commands: Vec<StartedProgram> = Vec::new();
     let tab_adapter = choose_tab_adapter()?;
-    let mut display_status = DisplayStatus::new(tab_adapter);
+    let mut display_status = DisplayStatus::new(tab_adapter, &aes, aer);
+
     for spec in config.apps.iter() {
         let comm = start_command(&config.namespace, &spec)?;
         started_commands.push(comm);
@@ -352,10 +457,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         match evt {
             AppEvent::ProcessEnded(s, s_name, _t_pid, p_pid, _) => {
                 display_status.mark_app_dead(&s, &s_name, &p_pid);
+                error!("Application Died: {}", s);
                 terminal.draw(|f| f.render_widget(&display_status, f.area()))?;
             }
             AppEvent::QuitKeyEvent => {
+                info!("Shutdown Request Received.");
                 display_status.execute_quit();
+                terminal.draw(|f| f.render_widget(&display_status, f.area()))?;
+            }
+            AppEvent::LogEvent(ld) => {
+                display_status.add_log_entry(&ld);
                 terminal.draw(|f| f.render_widget(&display_status, f.area()))?;
             }
             _ => {

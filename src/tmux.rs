@@ -1,5 +1,6 @@
 use std::{collections::HashMap, error::Error, io::BufRead, str::FromStr};
 
+use log::info;
 use tmux_interface::{KillSession, ListSessions, NewSession, SendKeys};
 
 use crate::config::ProgramSpec;
@@ -76,6 +77,7 @@ pub(crate) fn convert_pids(
         let pm = pid_mapping
             .get(&sn)
             .ok_or_else(|| ProgramStartErrors::ProgramDiedEarlyError(sn.clone()))?;
+        info!("Attached to {} - PID {}", sc.spec.name, pm.1);
         let rp = RunningProgram {
             spec: sc.spec.clone(),
             program: RunningTmuxProgram {
@@ -108,6 +110,7 @@ pub(crate) fn start_command(
     let command_with_remain =
         format!("tmux set-option -t {} remain-on-exit on; ", s_name) + &p_spec.command;
 
+    info!("Starting Session for {}", p_spec.name);
     let s_cmd = NewSession::new()
         .detached()
         .session_name(&s_name)
