@@ -1,8 +1,9 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, LinkedList, VecDeque},
     error::Error,
     io::Write,
     process::ExitStatus,
+    str::Lines,
     sync::{
         Arc, Mutex,
         mpsc::{Receiver, Sender},
@@ -76,7 +77,7 @@ impl<'a> EventLogger<'a> {
 }
 
 impl<'a> Log for EventLogger<'a> {
-    fn enabled(&self, metadata: &log::Metadata) -> bool {
+    fn enabled(&self, _metadata: &log::Metadata) -> bool {
         true
     }
 
@@ -100,12 +101,22 @@ struct LogBuffer {
 impl LogBuffer {
     fn new() -> Self {
         LogBuffer {
-            data_queue: VecDeque::with_capacity(4096),
+            data_queue: VecDeque::with_capacity(512),
         }
     }
 
     fn write_data(&mut self, data: &Vec<u8>) {
-        self.data_queue.write_all(data.as_slice()).unwrap();
+        if data.len() > 512 {
+            self.data_queue.clear();
+            let start_n = data.len() - 512;
+            self.data_queue.write_all(&data[start_n..]).unwrap();
+        } else if self.data_queue.len() + data.len() > 512 {
+            let dropped_length = (self.data_queue.len() + data.len()) - 512;
+            self.data_queue.drain(0..dropped_length);
+            self.data_queue.write_all(data.as_slice()).unwrap();
+        } else {
+            self.data_queue.write_all(data.as_slice()).unwrap();
+        }
     }
 }
 
@@ -326,8 +337,8 @@ impl<'a> Widget for &DisplayStatus<'a> {
         let [t_area] = hlayout.areas(tlayout.split(vlayouttop[0])[0]);
         let p = Paragraph::new("Q - Quit").centered();
         let log_string = Vec::from_iter(self.logbuffer.data_queue.iter().map(|f| f.clone()));
-        let block = Block::bordered().border_set(symbols::border::PLAIN);
-        let log_p = Paragraph::new(unsafe { String::from_utf8_unchecked(log_string) }).block(block);
+        let str = unsafe { String::from_utf8_unchecked(log_string) };
+        let log_p = Paragraph::new(str);
         log_p.render(log_area, buf);
         table.render(t_area, buf);
         p.render(help_area, buf);
