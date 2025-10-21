@@ -1,20 +1,19 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     error::Error,
-    io::Write,
-    process::ExitStatus,
-    sync::{
-        Arc, Mutex,
-        mpsc::{Receiver, Sender},
-    },
+    sync::mpsc::{Receiver, Sender},
     thread::JoinHandle,
     time::Duration,
 };
 
 mod config;
 
-use log::{Log, error, info};
-use simplelog::{Config, WriteLogger};
+mod apps;
+
+use log::{error, info};
+
+mod logging;
+
 use sysinfo::Pid;
 
 mod tabadapter;
@@ -34,95 +33,13 @@ use std::sync::mpsc::channel;
 use std::thread;
 
 use crate::{
+    apps::{AppEvent, AppStatus, wait_for_term},
     config::try_load_config,
+    logging::{LogBuffer, initialize_logger},
     processes::kill_process,
     tabadapter::{TabAdapter, choose_tab_adapter},
     tmux::{RunningProgram, StartedProgram, cleanup_session, convert_pids, start_command},
 };
-
-struct WritableClearableLog {
-    inner: Arc<Mutex<Vec<u8>>>,
-}
-
-struct EventLogger<'a> {
-    event_sender: &'a Sender<AppEvent>,
-    writer: Arc<Mutex<Vec<u8>>>,
-    write_logger: Box<WriteLogger<WritableClearableLog>>,
-}
-
-impl Write for WritableClearableLog {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.inner.lock().unwrap().write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> EventLogger<'a> {
-    fn new(sender: &'a Sender<AppEvent>) -> Self {
-        let r_vec = Arc::new(Mutex::new(Vec::new()));
-        let wcl = WritableClearableLog {
-            inner: r_vec.clone(),
-        };
-        EventLogger {
-            writer: r_vec,
-            event_sender: sender,
-            write_logger: WriteLogger::new(log::LevelFilter::Trace, Config::default(), wcl),
-        }
-    }
-}
-
-impl<'a> Log for EventLogger<'a> {
-    fn enabled(&self, _metadata: &log::Metadata) -> bool {
-        true
-    }
-
-    fn log(&self, record: &log::Record) {
-        {
-            let l = self.writer.lock();
-            l.unwrap().clear();
-        };
-        self.write_logger.log(record);
-        let ls = self.writer.lock().unwrap().clone();
-        let _ = self.event_sender.send(AppEvent::LogEvent(ls));
-    }
-
-    fn flush(&self) {}
-}
-
-struct LogBuffer {
-    data_queue: VecDeque<u8>,
-}
-
-impl LogBuffer {
-    fn new() -> Self {
-        LogBuffer {
-            data_queue: VecDeque::with_capacity(512),
-        }
-    }
-
-    fn write_data(&mut self, data: &Vec<u8>) {
-        if data.len() > 512 {
-            self.data_queue.clear();
-            let start_n = data.len() - 512;
-            self.data_queue.write_all(&data[start_n..]).unwrap();
-        } else if self.data_queue.len() + data.len() > 512 {
-            let dropped_length = (self.data_queue.len() + data.len()) - 512;
-            self.data_queue.drain(0..dropped_length);
-            self.data_queue.write_all(data.as_slice()).unwrap();
-        } else {
-            self.data_queue.write_all(data.as_slice()).unwrap();
-        }
-    }
-}
-
-enum AppStatus {
-    Started,
-    Running(Pid),
-    Dead(Pid),
-}
 
 struct DisplayStatus<'a> {
     app_statuses: HashMap<String, AppStatus>,
@@ -343,43 +260,6 @@ impl<'a> Widget for &DisplayStatus<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
-enum AppEvent {
-    ReceiveErr,
-    IgnoredEvent,
-    QuitKeyEvent,
-    LogEvent(Vec<u8>),
-    #[allow(dead_code)]
-    ProcessEnded(String, String, Pid, Pid, Option<ExitStatus>),
-}
-
-fn wait_for_term(out_chan: &Sender<AppEvent>, running_p: &RunningProgram) -> JoinHandle<()> {
-    let rp = (*running_p).clone();
-    let tx = out_chan.clone();
-    thread::spawn(move || {
-        let s: sysinfo::System = sysinfo::System::new_all();
-        let p_proc = s.process(rp.program.program_pid);
-        if let Some(_p_pid) = p_proc {
-            let stat = p_proc.unwrap().wait();
-            let _ = tx.send(AppEvent::ProcessEnded(
-                rp.spec.name,
-                rp.program.session_name,
-                rp.program.tmux_pid,
-                rp.program.program_pid,
-                stat,
-            ));
-        } else {
-            let _ = tx.send(AppEvent::ProcessEnded(
-                rp.spec.name,
-                rp.program.session_name,
-                rp.program.tmux_pid,
-                rp.program.program_pid,
-                None,
-            ));
-        }
-    })
-}
-
 fn start_event_loop(out_chan: &Sender<AppEvent>, die_chan: Receiver<()>) -> JoinHandle<()> {
     let tx = out_chan.clone();
     thread::spawn(move || {
@@ -433,16 +313,9 @@ fn create_app_event_channel() -> (&'static Sender<AppEvent>, Receiver<AppEvent>)
     (Box::leak(Box::new(s)), r)
 }
 
-fn create_event_logger(aes: &'static Sender<AppEvent>) -> &'static dyn Log {
-    let el = EventLogger::new(&aes);
-    Box::leak(Box::new(el))
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     let (aes, aer) = create_app_event_channel();
-    let logger = create_event_logger(aes);
-    log::set_logger(&*logger).unwrap();
-    log::set_max_level(log::LevelFilter::Info);
+    initialize_logger(aes);
     let mut args = std::env::args();
 
     let exe_loc = std::env::current_dir().unwrap();
