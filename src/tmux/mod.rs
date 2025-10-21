@@ -3,7 +3,7 @@ use std::{collections::HashMap, error::Error, io::BufRead, str::FromStr};
 use log::info;
 use tmux_interface::{ListSessions, NewSession, SendKeys};
 
-use crate::{apps::IntoWith, config::ProgramSpec};
+use crate::{apps::TryIntoWith, config::ProgramSpec};
 
 mod commands;
 
@@ -45,11 +45,10 @@ pub(crate) struct RunningProgram {
     pub(crate) program: RunningTmuxProgram,
 }
 
-impl
-    IntoWith<Result<RunningProgram, Box<dyn Error>>, &HashMap<String, (sysinfo::Pid, sysinfo::Pid)>>
+impl TryIntoWith<RunningProgram, &HashMap<String, (sysinfo::Pid, sysinfo::Pid)>>
     for &StartedProgram
 {
-    fn into_with(
+    fn try_into_with(
         &self,
         ctx: &HashMap<String, (sysinfo::Pid, sysinfo::Pid)>,
     ) -> Result<RunningProgram, Box<dyn Error>> {
@@ -94,7 +93,7 @@ pub(crate) fn convert_pids(
         }
     }
     for sc in started_commands.iter() {
-        let rp = sc.into_with(&pid_mapping)?;
+        let rp = sc.try_into_with(&pid_mapping)?;
         running_programs.push(rp);
     }
     Ok(running_programs)
@@ -109,13 +108,13 @@ pub(crate) fn send_interrupt(session_name: &str) {
         .status();
 }
 
-impl IntoWith<Result<StartedProgram, Box<dyn Error>>, &str> for &ProgramSpec {
-    fn into_with(&self, ctx: &str) -> Result<StartedProgram, Box<dyn Error>> {
+impl TryIntoWith<StartedProgram, &str> for &ProgramSpec {
+    fn try_into_with(&self, ctx: &str) -> Result<StartedProgram, Box<dyn Error>> {
         start_command(ctx, self)
     }
 }
 
-pub(crate) fn start_command(
+fn start_command(
     session_name: &str,
     p_spec: &ProgramSpec,
 ) -> Result<StartedProgram, Box<dyn Error>> {

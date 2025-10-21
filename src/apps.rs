@@ -1,4 +1,5 @@
 use std::{
+    error::Error,
     process::ExitStatus,
     sync::mpsc::Sender,
     thread::{self, JoinHandle},
@@ -24,8 +25,8 @@ pub(crate) enum AppEvent {
     ProcessEnded(String, String, Pid, Pid, Option<ExitStatus>),
 }
 
-pub(crate) trait IntoWith<T, C> {
-    fn into_with(&self, ctx: C) -> T;
+pub(crate) trait TryIntoWith<T, C> {
+    fn try_into_with(&self, ctx: C) -> Result<T, Box<dyn Error>>;
 }
 
 pub(crate) fn wait_for_term(

@@ -33,7 +33,7 @@ use std::sync::mpsc::channel;
 use std::thread;
 
 use crate::{
-    apps::{AppEvent, AppStatus, IntoWith, wait_for_term},
+    apps::{AppEvent, AppStatus, TryIntoWith, wait_for_term},
     config::try_load_config,
     logging::{LogBuffer, initialize_logger},
     processes::kill_process,
@@ -260,7 +260,10 @@ impl<'a> Widget for &DisplayStatus<'a> {
     }
 }
 
-fn start_event_loop(out_chan: &Sender<AppEvent>, die_chan: Receiver<()>) -> JoinHandle<()> {
+pub(crate) fn start_event_loop(
+    out_chan: &Sender<AppEvent>,
+    die_chan: Receiver<()>,
+) -> JoinHandle<()> {
     let tx = out_chan.clone();
     thread::spawn(move || {
         loop {
@@ -328,7 +331,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut display_status = DisplayStatus::new(tab_adapter, &aes, aer);
 
     for spec in config.apps.iter() {
-        let comm = spec.into_with(&config.namespace)?;
+        let comm = spec.try_into_with(&config.namespace)?;
         started_commands.push(comm);
         display_status.mark_app_started(&spec.name);
     }
