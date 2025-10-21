@@ -60,7 +60,7 @@ pub(crate) fn iterm_installed() -> bool {
         Err(_e) => false,
         Ok(o) => OsStr::from_bytes(&o.stdout.as_slice())
             .to_str()
-            .map(|f| f.contains("iTrm.app"))
+            .map(|f| f.contains("iTerm.app"))
             .unwrap_or(false),
     }
 }
