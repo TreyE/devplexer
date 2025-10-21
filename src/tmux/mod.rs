@@ -3,7 +3,7 @@ use std::{collections::HashMap, error::Error, io::BufRead, str::FromStr};
 use log::info;
 use tmux_interface::{ListSessions, NewSession, SendKeys};
 
-use crate::config::ProgramSpec;
+use crate::{apps::IntoWith, config::ProgramSpec};
 
 mod commands;
 
@@ -45,6 +45,31 @@ pub(crate) struct RunningProgram {
     pub(crate) program: RunningTmuxProgram,
 }
 
+impl
+    IntoWith<Result<RunningProgram, Box<dyn Error>>, &HashMap<String, (sysinfo::Pid, sysinfo::Pid)>>
+    for &StartedProgram
+{
+    fn into_with(
+        &self,
+        ctx: &HashMap<String, (sysinfo::Pid, sysinfo::Pid)>,
+    ) -> Result<RunningProgram, Box<dyn Error>> {
+        let sn = self.session_name.clone();
+        let pm = ctx
+            .get(&sn)
+            .ok_or_else(|| ProgramStartErrors::ProgramDiedEarlyError(sn.clone()))?;
+        let rp = RunningProgram {
+            spec: self.spec.clone(),
+            program: RunningTmuxProgram {
+                command: self.command.clone(),
+                session_name: sn,
+                tmux_pid: pm.0,
+                program_pid: pm.1,
+            },
+        };
+        Ok(rp)
+    }
+}
+
 pub(crate) fn convert_pids(
     started_commands: &Vec<StartedProgram>,
 ) -> Result<Vec<RunningProgram>, Box<dyn Error>> {
@@ -69,20 +94,7 @@ pub(crate) fn convert_pids(
         }
     }
     for sc in started_commands.iter() {
-        let sn = sc.session_name.clone();
-        let pm = pid_mapping
-            .get(&sn)
-            .ok_or_else(|| ProgramStartErrors::ProgramDiedEarlyError(sn.clone()))?;
-        info!("Attached to {} - PID {}", sc.spec.name, pm.1);
-        let rp = RunningProgram {
-            spec: sc.spec.clone(),
-            program: RunningTmuxProgram {
-                command: sc.command.clone(),
-                session_name: sn,
-                tmux_pid: pm.0,
-                program_pid: pm.1,
-            },
-        };
+        let rp = sc.into_with(&pid_mapping)?;
         running_programs.push(rp);
     }
     Ok(running_programs)
@@ -95,6 +107,12 @@ pub(crate) fn send_interrupt(session_name: &str) {
         .build()
         .into_tmux()
         .status();
+}
+
+impl IntoWith<Result<StartedProgram, Box<dyn Error>>, &str> for &ProgramSpec {
+    fn into_with(&self, ctx: &str) -> Result<StartedProgram, Box<dyn Error>> {
+        start_command(ctx, self)
+    }
 }
 
 pub(crate) fn start_command(
@@ -112,7 +130,7 @@ pub(crate) fn start_command(
         .session_name(&s_name)
         .start_directory(p_spec.working_directory.as_os_str().to_string_lossy())
         .shell_command(command_with_remain.clone());
-    let tmux = s_cmd.build().into_tmux(); //.into_tmux();
+    let tmux = s_cmd.build().into_tmux();
     let _estatus = tmux.status()?;
     Ok(StartedProgram {
         spec: p_spec.clone(),

@@ -33,12 +33,12 @@ use std::sync::mpsc::channel;
 use std::thread;
 
 use crate::{
-    apps::{AppEvent, AppStatus, wait_for_term},
+    apps::{AppEvent, AppStatus, IntoWith, wait_for_term},
     config::try_load_config,
     logging::{LogBuffer, initialize_logger},
     processes::kill_process,
     tabadapter::{TabAdapter, choose_tab_adapter},
-    tmux::{RunningProgram, StartedProgram, cleanup_session, convert_pids, start_command},
+    tmux::{RunningProgram, StartedProgram, cleanup_session, convert_pids},
 };
 
 struct DisplayStatus<'a> {
@@ -328,7 +328,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut display_status = DisplayStatus::new(tab_adapter, &aes, aer);
 
     for spec in config.apps.iter() {
-        let comm = start_command(&config.namespace, &spec)?;
+        let comm = spec.into_with(&config.namespace)?;
         started_commands.push(comm);
         display_status.mark_app_started(&spec.name);
     }

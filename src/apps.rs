@@ -24,6 +24,10 @@ pub(crate) enum AppEvent {
     ProcessEnded(String, String, Pid, Pid, Option<ExitStatus>),
 }
 
+pub(crate) trait IntoWith<T, C> {
+    fn into_with(&self, ctx: C) -> T;
+}
+
 pub(crate) fn wait_for_term(
     out_chan: &Sender<AppEvent>,
     running_p: &RunningProgram,
