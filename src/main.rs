@@ -1,9 +1,8 @@
 use std::{
-    collections::{HashMap, LinkedList, VecDeque},
+    collections::{HashMap, VecDeque},
     error::Error,
     io::Write,
     process::ExitStatus,
-    str::Lines,
     sync::{
         Arc, Mutex,
         mpsc::{Receiver, Sender},
@@ -28,9 +27,8 @@ use ratatui::{
     crossterm::event::{self, Event, KeyCode},
     layout::{Constraint, Flex, Layout},
     style::Stylize,
-    symbols,
     text::Text,
-    widgets::{Block, Paragraph, Row, Table, Widget},
+    widgets::{Paragraph, Row, Table, Widget},
 };
 use std::sync::mpsc::channel;
 use std::thread;

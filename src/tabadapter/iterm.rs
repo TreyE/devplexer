@@ -1,9 +1,10 @@
-use std::{collections::HashMap, error::Error, ffi::OsStr, os::unix::ffi::OsStringExt};
+use std::{
+    collections::HashMap, error::Error, ffi::OsStr, os::unix::ffi::OsStrExt, process::Command,
+};
 
 use osakit::{Script, Value};
-use tmux_interface::AttachSession;
 
-use crate::tabadapter::TabAdapter;
+use crate::{tabadapter::TabAdapter, tmux::attach_session_command_for_cli};
 
 pub(crate) struct ITermTabAdapter {
     current_session: Value,
@@ -41,6 +42,26 @@ impl TabAdapter for ITermTabAdapter {
 
     fn after_all_closed(&mut self) {
         let _ = refocus_original_session(&self.current_session);
+    }
+}
+
+pub(crate) fn iterm_installed() -> bool {
+    let mut cmd = Command::new("mdfind");
+    cmd.args([
+        "-onlyin",
+        "\"/Applications\"",
+        "\"kMDItemKind == 'Application'\"",
+        "|",
+        "grep",
+        "iTerm.app",
+    ]);
+    let res = cmd.output();
+    match res {
+        Err(_e) => false,
+        Ok(o) => OsStr::from_bytes(&o.stdout.as_slice())
+            .to_str()
+            .map(|f| f.contains("iTrm.app"))
+            .unwrap_or(false),
     }
 }
 
@@ -134,17 +155,7 @@ fn cleanup_iterm_tab(t: &Value) -> Result<(), Box<dyn Error>> {
 }
 
 fn spawn_iterm_tab(session_name: &str) -> Result<Value, Box<dyn Error>> {
-    let cmd = AttachSession::new()
-        .target_session(session_name)
-        .detach_other()
-        .build()
-        .into_tmux()
-        .into_command();
-    let cmd_args: Vec<&OsStr> = cmd.get_args().collect();
-    let mut encoded_string = cmd.get_program().to_os_string().into_encoded_bytes();
-    encoded_string.extend(" ".as_bytes());
-    encoded_string.extend(cmd_args.join(OsStr::new(" ")).into_vec());
-    let cmd_string: String = String::from_utf8(encoded_string)?;
+    let cmd_string = attach_session_command_for_cli(session_name)?;
     let cmd_str = osakit::Value::String(cmd_string);
     let mut script = Script::new_from_source(
         osakit::Language::AppleScript,

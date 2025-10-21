@@ -1,9 +1,13 @@
 use std::{collections::HashMap, error::Error, io::BufRead, str::FromStr};
 
 use log::info;
-use tmux_interface::{KillSession, ListSessions, NewSession, SendKeys};
+use tmux_interface::{ListSessions, NewSession, SendKeys};
 
 use crate::config::ProgramSpec;
+
+mod commands;
+
+pub(crate) use commands::*;
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -39,14 +43,6 @@ pub(crate) struct StartedProgram {
 pub(crate) struct RunningProgram {
     pub(crate) spec: ProgramSpec,
     pub(crate) program: RunningTmuxProgram,
-}
-
-pub(crate) fn cleanup_session(session_name: &str) {
-    let _ = KillSession::new()
-        .target_session(session_name)
-        .build()
-        .into_tmux()
-        .status();
 }
 
 pub(crate) fn convert_pids(

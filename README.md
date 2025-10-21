@@ -4,7 +4,7 @@ A tool for starting multiple developer commands in your projects - with seperate
 
 Horribly abuses tmux to multiplex your services.
 
-Currently only supports iTerm.
+Currently only supports iTerm and the OSX Terminal.
 
 Used by creating a devplexer.yml file in your working directory, here's an example:
 ```yaml
